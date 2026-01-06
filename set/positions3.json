@@ -1,0 +1,6 @@
+[
+	{"start":[70,70],"goal":[860,480],"radius":12,"radar_range":25},
+	{"start":[140,70],"goal":[890,480],"radius":12,"radar_range":25},
+	{"start":[70,140],"goal":[860,510],"radius":12,"radar_range":25},
+	{"start":[140,140],"goal":[890,510],"radius":12,"radar_range":25}
+]

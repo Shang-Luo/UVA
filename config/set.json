@@ -1,0 +1,10 @@
+{
+  "simulation_rate": 20,
+  "show_history": true,
+  "history": {
+    "color": [50, 120, 255],
+    "width": 2,
+    "max_length": 1000
+  }
+  ,"show_radar": true
+}
