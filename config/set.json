@@ -7,4 +7,5 @@
     "max_length": 1000
   }
   ,"show_radar": true
+  ,"ifpy": false
 }

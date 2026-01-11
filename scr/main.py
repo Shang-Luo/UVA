@@ -108,4 +108,12 @@ def draw_frame(screen, font, state):
             btn_text = btn_font.render("START", True, (255,255,255))
         screen.blit(btn_text, (btn_rect.x + 18, btn_rect.y + 6))
 
+    # draw FPS at top-right
+    fps = state.get("fps", None)
+    if fps is not None:
+        fps_text = font.render(f"FPS: {fps:.1f}", True, (220,220,220))
+        fps_rect = fps_text.get_rect()
+        fps_rect.topright = (screen.get_width() - 8, 8)
+        screen.blit(fps_text, fps_rect)
+
     pygame.display.flip()
