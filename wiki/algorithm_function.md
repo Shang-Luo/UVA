@@ -11,10 +11,10 @@
     - `goals`: 列表，N 个目标点，每个为 `[x,y]`
     - `steps`（可选）：每条路径采样点数量（整数）
   - 输出：
-    - 返回长度为 N 的列表，每个元素为路径点序列（每个点为 `(x,y)`），路径长度约为 `steps`。
-  - 作用：
+    - 返回长度为 N 的列表，每个元素为路径点序列（每个点为 `(x,y)`）。每次调用最多返回 `steps` 个点；若实际生成的点少于 `steps`，则返回实际点数（不会填充到 `steps`）。
+  -  - 作用：
     - 使用可见图（visibility graph）对每个 start->goal 规划碰撞避让路径。
-    - 若直线可通行则直接线性插值；否则构建顶点图并在其上用 Dijkstra 最短路径，再按长度采样成 `steps` 个点。
+    - 若直线可通行则根据 `steps` 做线性插值（最多 `steps` 点）；否则构建顶点图并在其上用 Dijkstra 最短路径，再按段长度采样得到不超过 `steps` 个采样点（若采样点少于 `steps`，则返回实际点数）。
 
 - `compute_acceleration(radar_readings, directions, target_vec, vel, params=None)`
   - 输入：
@@ -43,8 +43,13 @@
     - `n_agents`: 无人机数量
     - `steps`: 每条路径采样点个数
   - 返回值：
-    - 返回分配的 `double*`，长度为 `n_agents * steps * 2`，顺序为每个 agent 的 `steps` 个 `(x,y)` 对。
-    - 调用方必须使用库提供的 `free_buffer(double*)` 释放。
+    - 返回值（new）：
+      - 返回分配的 `double*`，内存中用 double 打包存放，格式为：
+        - 第一个 double 为 `n_agents`（取整为整数）。
+        - 接下来 `n_agents` 个 double，分别是每个 agent 返回的点数 `counts[i]`（整数值，以 double 存储）。
+        - 随后是所有 agent 的坐标点按顺序拼接的 `(x,y)` 双精度数组，长度为 `sum(counts)*2`。
+      - 该格式允许每个 agent 返回不同数量的导航点（最多由 `steps` 限定）。
+      - 调用方必须使用库提供的 `free_buffer(double*)` 释放。
 
 - compute_acceleration_c
   - 签名：

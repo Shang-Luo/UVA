@@ -1,0 +1,50 @@
+[
+  {
+    "start": [
+      40,
+      429
+    ],
+    "goal": [
+      744,
+      271
+    ],
+    "radius": 12,
+    "radar_range": 25
+  },
+  {
+    "start": [
+      13,
+      468
+    ],
+    "goal": [
+      736,
+      219
+    ],
+    "radius": 12,
+    "radar_range": 25
+  },
+  {
+    "start": [
+      37,
+      494
+    ],
+    "goal": [
+      720,
+      309
+    ],
+    "radius": 12,
+    "radar_range": 25
+  },
+  {
+    "start": [
+      75,
+      452
+    ],
+    "goal": [
+      680,
+      261
+    ],
+    "radius": 12,
+    "radar_range": 25
+  }
+]

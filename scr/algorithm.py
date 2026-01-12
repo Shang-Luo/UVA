@@ -140,11 +140,9 @@ def plan_paths(obstacles, starts, goals, steps=200):
                 t = j / float(k)
                 samples.append(_interp(a, b, t))
         samples.append(pts[-1])
-        # trim or pad to exactly steps
+        # 如果采样点多于 steps，则截断到前 steps 个；若少于 steps，保持原样（不再填充）
         if len(samples) > steps:
             return samples[:steps]
-        while len(samples) < steps:
-            samples.append(pts[-1])
         return samples
 
     paths = []

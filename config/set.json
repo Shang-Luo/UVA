@@ -1,5 +1,7 @@
 {
   "simulation_rate": 20,
+  "rePlan_pathsT": 100,
+  "plan_step_max": 20,
   "show_history": true,
   "history": {
     "color": [50, 120, 255],
@@ -8,4 +10,6 @@
   }
   ,"show_radar": true
   ,"ifpy": false
+  ,"obs_file": "obstacles2.json"
+  ,"pos_file": "positions3.json"
 }

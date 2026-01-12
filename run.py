@@ -8,8 +8,22 @@ from scr import main as renderer
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SET_DIR = os.path.join(BASE_DIR, "set")
-OBS_FILE = os.path.join(SET_DIR, "obstacles2.json")
-POS_FILE = os.path.join(SET_DIR, "positions3.json")
+# 从配置文件读取数据文件名（可在 config/set.json 中配置 'obs_file' 和 'pos_file'），
+# 若配置缺失则使用默认值
+cfg_path = os.path.join(BASE_DIR, "config", "set.json")
+_cfg = {}
+if os.path.exists(cfg_path):
+    try:
+        with open(cfg_path, 'r', encoding='utf-8') as _cf:
+            _cfg = json.load(_cf)
+    except Exception:
+        _cfg = {}
+
+OBS_NAME = _cfg.get('obs_file', 'obstacles2.json')
+POS_NAME = _cfg.get('pos_file', 'positions3.json')
+
+OBS_FILE = os.path.join(SET_DIR, OBS_NAME)
+POS_FILE = os.path.join(SET_DIR, POS_NAME)
 
 # load data
 with open(OBS_FILE, "r", encoding="utf-8") as f:
@@ -33,6 +47,7 @@ class Drone:
         self.arrived = False
         self.block_added = False
         self.history = [(self.pos[0], self.pos[1])]
+        self.nav_points = []
 
     def update(self, dt=1.0):
         self.vel[0] += self.acc[0] * dt
@@ -111,6 +126,13 @@ def main():
     drones = [Drone(starts[i], radii[i], radar_ranges[i]) for i in range(len(starts))]
     orig_obstacles = copy.deepcopy(obstacles)
 
+    # planning configuration
+    replan_T = int(cfg.get("rePlan_pathsT", 10))
+    plan_step_max = int(cfg.get("plan_step_max", 20))
+    # planning bookkeeping
+    planned_paths = [[] for _ in drones]
+    replan_cursor = 0
+
     # If `ifpy` is false, prepare ctypes wrappers to call compiled C DLLs
     plan_paths_fn = algorithm.plan_paths
     compute_acc_fn = algorithm.compute_acceleration
@@ -140,7 +162,7 @@ def main():
             acc_dll.compute_acceleration_c.argtypes = [POINTER(c_double), POINTER(c_double), c_int, POINTER(c_double), POINTER(c_double), POINTER(c_double)]
 
             def plan_paths_c_wrapper(obstacles_py, starts_py, goals_py, steps=200):
-                # flatten polygon vertices and counts
+                # Pack obstacles verts
                 poly_counts = []
                 verts = []
                 for poly in obstacles_py:
@@ -165,20 +187,33 @@ def main():
 
                 n_agents = len(starts_py)
                 ptr = plan_dll.plan_paths_c(verts_arr, counts_arr, c_int(n_polys), c_int(total_vertices), starts_arr, goals_arr, c_int(n_agents), c_int(steps))
-                # expected length = n_agents * steps * 2
-                out_len = n_agents * steps * 2
                 res = []
-                if out_len > 0:
-                    for i in range(n_agents):
-                        path = []
-                        for j in range(steps):
-                            idx = (i*steps + j) * 2
-                            x = ptr[idx]
-                            y = ptr[idx+1]
-                            path.append((x, y))
-                        res.append(path)
-                # free buffer
+                if not ptr:
+                    return [[] for _ in range(n_agents)]
+                # New C format: [n_agents(double), counts[0..n_agents-1] (double), coords...]
+                try:
+                    returned_n = int(ptr[0])
+                except Exception:
+                    plan_dll.free_buffer(ptr)
+                    return [[] for _ in range(n_agents)]
+                counts = []
+                for i in range(returned_n):
+                    counts.append(int(ptr[1 + i]))
+                offset = 1 + returned_n
+                coord_idx = offset
+                for i in range(returned_n):
+                    cnt = counts[i]
+                    path = []
+                    for j in range(cnt):
+                        x = ptr[coord_idx + (j*2) + 0]
+                        y = ptr[coord_idx + (j*2) + 1]
+                        path.append((x, y))
+                    coord_idx += cnt * 2
+                    res.append(path)
                 plan_dll.free_buffer(ptr)
+                # If returned fewer agents than requested, pad
+                if len(res) < n_agents:
+                    res.extend([[] for _ in range(n_agents - len(res))])
                 return res
 
             def compute_acc_c_wrapper(readings, dirs, target_vec, vel, params=None):
@@ -234,9 +269,35 @@ def main():
                             d.history = [(float(starts[j][0]), float(starts[j][1]))]
                         obstacles[:] = copy.deepcopy(orig_obstacles)
 
-        # per-frame computation
+        # per-frame computation: incremental replanning to limit work per frame
         current_starts = [[d.pos[0], d.pos[1]] for d in drones]
-        planned_paths = plan_paths_fn(obstacles, current_starts, goals, steps=200)
+        M = len(drones)
+        T = max(1, replan_T)
+        per_frame = max(1, int(math.ceil(float(M) / float(T))))
+        # select indices to replan this frame
+        indices = []
+        for k in range(per_frame):
+            if M == 0:
+                break
+            idx = (replan_cursor + k) % M
+            if idx not in indices:
+                indices.append(idx)
+
+        if len(indices) > 0:
+            subset_starts = [current_starts[i] for i in indices]
+            subset_goals = [goals[i] for i in indices]
+            try:
+                subset_paths = plan_paths_fn(obstacles, subset_starts, subset_goals, steps=plan_step_max)
+            except Exception:
+                subset_paths = [[] for _ in indices]
+            # assign back into drones' nav_points and planned_paths
+            for j, ai in enumerate(indices):
+                path = subset_paths[j] if j < len(subset_paths) else []
+                drones[ai].nav_points = path
+                planned_paths[ai] = path
+
+        # advance cursor for next frame
+        replan_cursor = (replan_cursor + per_frame) % (M if M>0 else 1)
 
         # compute radar data for visualization and control
         radar_data = []
@@ -244,10 +305,10 @@ def main():
             raw_readings, dirs = cast_radar(d.pos, obstacles, 8, d.radar)
             radar_data.append((raw_readings, dirs))
 
-        for i, path in enumerate(planned_paths):
-            if len(path) == 0:
+        for i, drone in enumerate(drones):
+            path = drone.nav_points if getattr(drone, 'nav_points', None) else planned_paths[i]
+            if not path:
                 continue
-            drone = drones[i]
 
             nearest_idx = 0
             best_d2 = float('inf')
@@ -282,7 +343,6 @@ def main():
             if not drone.arrived:
                 raw_readings, dirs = radar_data[i]
                 readings = [max(r - drone.radius, 0.01) for r in raw_readings]
-
                 lookahead = min(nearest_idx + 6, len(path)-1)
                 target_pt = path[lookahead]
                 target_vec = (target_pt[0] - drone.pos[0], target_pt[1] - drone.pos[1])
