@@ -62,6 +62,3 @@
 备注：
 - Python 侧 `run.py` 已加入 `ifpy` 配置开关（`config/set.json`）：默认 `true`。
 - 当 `ifpy=false` 时，`run.py` 会尝试从 `algorithmC/plan_paths.dll` 和 `algorithmC/acceleration.dll` 加载 `plan_paths_c` 与 `compute_acceleration_c`，并使用 ctypes 进行数据传递。若加载或调用失败，会回退到 Python 实现。
-
-***
-如需我把 C 实现改为更接近 Python 的可视图算法（visibility graph），我可以继续移植该部分逻辑到 C，或者提供 MSVC 编译命令示例。
