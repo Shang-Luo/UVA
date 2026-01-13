@@ -131,7 +131,8 @@ def main():
     plan_step_max = int(cfg.get("plan_step_max", 20))
     # planning bookkeeping
     planned_paths = [[] for _ in drones]
-    replan_cursor = 0
+    # replan_frame records the current frame index inside a T-frame replan cycle (0..T-1)
+    replan_frame = 0
 
     # If `ifpy` is false, prepare ctypes wrappers to call compiled C DLLs
     plan_paths_fn = algorithm.plan_paths
@@ -273,15 +274,28 @@ def main():
         current_starts = [[d.pos[0], d.pos[1]] for d in drones]
         M = len(drones)
         T = max(1, replan_T)
-        per_frame = max(1, int(math.ceil(float(M) / float(T))))
         # select indices to replan this frame
         indices = []
-        for k in range(per_frame):
-            if M == 0:
-                break
-            idx = (replan_cursor + k) % M
-            if idx not in indices:
-                indices.append(idx)
+        if M == 0:
+            indices = []
+        else:
+            if M <= T:
+                # When there are fewer drones than frames in a cycle,
+                # only frames 0..M-1 perform planning for drones 0..M-1 respectively;
+                # frames M..T-1 do nothing.
+                frame_idx = replan_frame % T
+                if frame_idx < M:
+                    indices = [frame_idx]
+                else:
+                    indices = []
+            else:
+                # When M > T, distribute agents across the T frames roughly evenly.
+                per_frame = int(math.ceil(float(M) / float(T)))
+                frame_idx = replan_frame % T
+                start = frame_idx * per_frame
+                end = min(start + per_frame, M)
+                if start < end:
+                    indices = list(range(start, end))
 
         if len(indices) > 0:
             subset_starts = [current_starts[i] for i in indices]
@@ -296,8 +310,8 @@ def main():
                 drones[ai].nav_points = path
                 planned_paths[ai] = path
 
-        # advance cursor for next frame
-        replan_cursor = (replan_cursor + per_frame) % (M if M>0 else 1)
+        # advance frame index for next frame's replan selection
+        replan_frame = (replan_frame + 1) % T
 
         # compute radar data for visualization and control
         radar_data = []
