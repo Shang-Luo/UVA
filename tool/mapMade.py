@@ -203,7 +203,8 @@ def main():
 
         instr = '按 p: 障碍物, o: 起终点, Ctrl+S: 保存, Ctrl+Z: 撤销, 右键: 结束多边形'
         it = font.render(instr, True, (200, 200, 200))
-        screen.blit(it, (10, MAP_H - 24))
+        # 向上移动10像素
+        screen.blit(it, (10, MAP_H - 34))
 
         pygame.display.flip()
         clock.tick(60)
