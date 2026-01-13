@@ -9,7 +9,7 @@
     "max_length": 1000
   }
   ,"show_radar": true
-  ,"ifpy": false
+  ,"ifpy": true
   ,"obs_file": "obstacles2.json"
   ,"pos_file": "positions3.json"
 }
