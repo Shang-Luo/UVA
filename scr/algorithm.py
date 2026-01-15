@@ -146,11 +146,39 @@ def plan_paths(obstacles, starts, goals, steps=200):
         return samples
 
     paths = []
-    # precompute polygon vertices
+    # precompute extended polygon vertices:
+    # 对于每个障碍物顶点，在该点处沿外角平分线向外延伸一定距离（30px），并把延伸点作为可见图节点。
+    # 注意：起点和终点不做延伸，仍在后面单独加入。
     poly_vertices = []
+    extend_dist = 30.0
     for poly in obstacles:
-        for v in poly:
-            poly_vertices.append((v[0], v[1]))
+        if len(poly) == 0:
+            continue
+        c = _centroid(poly)
+        n = len(poly)
+        for i, v in enumerate(poly):
+            p = poly[(i-1) % n]
+            nn = poly[(i+1) % n]
+            # 单位向量从顶点指向相邻顶点
+            u_prev = _normalize((p[0]-v[0], p[1]-v[1]))
+            u_next = _normalize((nn[0]-v[0], nn[1]-v[1]))
+            bx = u_prev[0] + u_next[0]
+            by = u_prev[1] + u_next[1]
+            b_norm = math.hypot(bx, by)
+            if b_norm < 1e-6:
+                # 若两邻边几乎共线或角度接近 180°，退化到从质心指向顶点的方向
+                od = _normalize((v[0]-c[0], v[1]-c[1]))
+            else:
+                bx /= b_norm
+                by /= b_norm
+                # interior bisector = (u_prev+u_next); 根据其与顶点指向质心向量的点积确定朝向，确保得到外侧方向
+                dot = bx*(v[0]-c[0]) + by*(v[1]-c[1])
+                if dot < 0:
+                    od = (-bx, -by)
+                else:
+                    od = (bx, by)
+            ext = (v[0] + od[0]*extend_dist, v[1] + od[1]*extend_dist)
+            poly_vertices.append(ext)
 
     for s, g in zip(starts, goals):
         # if straight segment is free, use it
@@ -201,10 +229,10 @@ def compute_acceleration(radar_readings, directions, target_vec, vel, params=Non
     if params is None:
         params = {}
     # tunable gains
-    k_goal = params.get("k_goal", 0.6)
-    avoid_gain = params.get("avoid_gain", 1.8)
-    max_acc = params.get("max_acc", 5.0)
-    max_range = params.get("max_range", max(radar_readings) if radar_readings else 1.0)
+    k_goal = params.get("k_goal", 0.6)#目标吸引力增益
+    avoid_gain = params.get("avoid_gain", 1.8)#障碍物排斥力增益
+    max_acc = params.get("max_acc", 5.0)#最大加速度
+    max_range = params.get("max_range", max(radar_readings) if radar_readings else 1.0)#雷达最大有效范围
 
     # desired direction towards target
     tx, ty = target_vec
