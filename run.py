@@ -246,6 +246,8 @@ def main():
     OFFSET = (0, 0)
 
     sim_running = False
+    sim_time = 0.0
+    timer_running = False
 
     running = True
     while running:
@@ -257,9 +259,14 @@ def main():
             if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                 if btn_rect.collidepoint(ev.pos):
                     if not sim_running:
+                        # start simulation: reset timer and start counting
                         sim_running = True
+                        sim_time = 0.0
+                        timer_running = True
                     else:
+                        # stop / reset simulation: stop timer and reset drones/obstacles
                         sim_running = False
+                        timer_running = False
                         for j, d in enumerate(drones):
                             d.pos[0] = float(starts[j][0])
                             d.pos[1] = float(starts[j][1])
@@ -271,6 +278,8 @@ def main():
                         obstacles[:] = copy.deepcopy(orig_obstacles)
 
         # per-frame computation: incremental replanning to limit work per frame
+        # frame timestep used for simulation updates (seconds)
+        frame_dt = float(sim_rate) / 60.0
         current_starts = [[d.pos[0], d.pos[1]] for d in drones]
         M = len(drones)
         T = max(1, replan_T)
@@ -298,10 +307,19 @@ def main():
                     indices = list(range(start, end))
 
         if len(indices) > 0:
-            subset_starts = [current_starts[i] for i in indices]
-            subset_goals = [goals[i] for i in indices]
+            # 过滤掉已到达的无人机，避免为已到达的无人机重新规划或拉取导航点
+            indices = [i for i in indices if not drones[i].arrived]
+            if len(indices) == 0:
+                subset_paths = []
+            else:
+                subset_starts = [current_starts[i] for i in indices]
+                subset_goals = [goals[i] for i in indices]
             try:
-                subset_paths = plan_paths_fn(obstacles, subset_starts, subset_goals, steps=plan_step_max)
+                # 如果 indices 为空，上面已置空 subset_paths
+                if len(indices) > 0:
+                    subset_paths = plan_paths_fn(obstacles, subset_starts, subset_goals, steps=plan_step_max)
+                else:
+                    subset_paths = []
             except Exception:
                 subset_paths = [[] for _ in indices]
             # assign back into drones' nav_points and planned_paths
@@ -344,6 +362,12 @@ def main():
                 drone.vel = [0.0, 0.0]
                 drone.acc = [0.0, 0.0]
                 drone.arrived = True
+                # 清空该无人机的导航点与已计划路径，避免渲染黄色路径残留
+                try:
+                    drone.nav_points = []
+                    planned_paths[i] = []
+                except Exception:
+                    pass
                 if not drone.block_added:
                     h = drone.radius
                     cx, cy = goal_world[0], goal_world[1]
@@ -387,11 +411,16 @@ def main():
 
                     drone.acc[0] = ax
                     drone.acc[1] = ay
-                    dt = float(sim_rate) / 60.0
+                    dt = frame_dt
                     drone.update(dt)
                     drone.history.append((drone.pos[0], drone.pos[1]))
                     if len(drone.history) > history_max_len:
                         drone.history = drone.history[-history_max_len:]
+
+        # 如果计时正在运行且并非所有无人机均已到位，则累加仿真时间
+        all_arrived = all([d.arrived for d in drones]) if drones else True
+        if timer_running and sim_running and (not all_arrived):
+            sim_time += frame_dt
 
         # prepare renderer state
         state = {
@@ -410,6 +439,7 @@ def main():
             "history_width": history_width,
             "SCALE": SCALE,
             "OFFSET": OFFSET,
+            "sim_time": sim_time,
         }
 
         # provide current FPS to renderer (clock.get_fps may reflect recent frames)

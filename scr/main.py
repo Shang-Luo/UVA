@@ -116,4 +116,16 @@ def draw_frame(screen, font, state):
         fps_rect.topright = (screen.get_width() - 8, 8)
         screen.blit(fps_text, fps_rect)
 
+    # draw simulation time below FPS if provided (format time=M:SSs)
+    sim_time = state.get("sim_time", None)
+    if sim_time is not None:
+        total_sec = int(sim_time)
+        mins = total_sec // 60
+        secs = total_sec % 60
+        time_text = font.render(f"time={mins}:{secs:02d}s", True, (220,220,220))
+        time_rect = time_text.get_rect()
+        # place below FPS
+        time_rect.topright = (screen.get_width() - 8, fps_rect.bottom + 6) if fps is not None else (screen.get_width() - 8, 28)
+        screen.blit(time_text, time_rect)
+
     pygame.display.flip()
