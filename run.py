@@ -5,6 +5,7 @@ import copy
 import pygame
 from scr import algorithm
 from scr import main as renderer
+from scr.rrt_star import rrt_star
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SET_DIR = os.path.join(BASE_DIR, "set")
@@ -134,109 +135,54 @@ def main():
     # replan_frame records the current frame index inside a T-frame replan cycle (0..T-1)
     replan_frame = 0
 
-    # If `ifpy` is false, prepare ctypes wrappers to call compiled C DLLs
-    plan_paths_fn = algorithm.plan_paths
+    # Use RRT* based planner (scr/rrt_star.py). Do not call algorithm.plan_paths.
+
+    def _poly_to_bbox(poly):
+        xs = [float(v[0]) for v in poly]
+        ys = [float(v[1]) for v in poly]
+        return {'type': 'rect', 'xmin': min(xs), 'ymin': min(ys), 'xmax': max(xs), 'ymax': max(ys)}
+
+    def plan_paths_rrt_star(obstacles_py, starts_py, goals_py, indices_list=None, steps=200):
+        # convert polygon obstacles to axis-aligned bounding boxes for rrt_star
+        rrt_obs = [_poly_to_bbox(poly) for poly in obstacles_py]
+        res = []
+        # compute bounds from obstacles and starts/goals
+        xs = []
+        ys = []
+        for poly in obstacles_py:
+            for v in poly:
+                xs.append(float(v[0])); ys.append(float(v[1]))
+        for s in starts_py:
+            xs.append(float(s[0])); ys.append(float(s[1]))
+        for g in goals_py:
+            xs.append(float(g[0])); ys.append(float(g[1]))
+        if not xs:
+            xmin, ymin, xmax, ymax = 0, 0, 1000, 1000
+        else:
+            pad = 50
+            xmin, ymin, xmax, ymax = min(xs)-pad, min(ys)-pad, max(xs)+pad, max(ys)+pad
+
+        # indices_list maps each start/goal to agent index to fetch its robot radius
+        if indices_list is None:
+            indices_list = list(range(len(starts_py)))
+
+        for k, (s, g) in enumerate(zip(starts_py, goals_py)):
+            agent_idx = indices_list[k] if k < len(indices_list) else None
+            robot_r = 0.0
+            try:
+                if agent_idx is not None:
+                    robot_r = float(drones[agent_idx].radius)
+            except Exception:
+                robot_r = 0.0
+            # increase max_iter to improve chance of finding a path
+            # set max iterations to large int (2^31-1) as requested
+            max_iter_use = 2147483647
+            path = rrt_star(tuple(s), tuple(g), rrt_obs, (xmin, ymin, xmax, ymax), max_iter=max_iter_use, step_size=8.0, search_radius=30.0, goal_sample_rate=0.05, robot_radius=robot_r, smooth=True, samples_per_segment=12)
+            res.append(path if path is not None else [])
+        return res
+
+    plan_paths_fn = plan_paths_rrt_star
     compute_acc_fn = algorithm.compute_acceleration
-    if not use_py:
-        try:
-            import ctypes
-            from ctypes import c_double, c_int, POINTER
-
-            base = BASE_DIR
-            plan_dll_path = os.path.join(base, "algorithmC", "plan_paths.dll")
-            acc_dll_path = os.path.join(base, "algorithmC", "acceleration.dll")
-
-            plan_dll = ctypes.CDLL(plan_dll_path)
-            acc_dll = ctypes.CDLL(acc_dll_path)
-
-            # plan_paths_c signature:
-            # double* plan_paths_c(const double* verts_flat, const int* poly_counts, int n_polys, int total_vertices, const double* starts, const double* goals, int n_agents, int steps)
-            plan_dll.plan_paths_c.restype = POINTER(c_double)
-            plan_dll.plan_paths_c.argtypes = [POINTER(c_double), POINTER(c_int), c_int, c_int, POINTER(c_double), POINTER(c_double), c_int, c_int]
-            # free helper
-            plan_dll.free_buffer.restype = None
-            plan_dll.free_buffer.argtypes = [POINTER(c_double)]
-
-            # compute_acceleration_c signature:
-            # void compute_acceleration_c(const double* radar_readings, const double* directions, int N, const double* target_vec, const double* vel, double* out_axay)
-            acc_dll.compute_acceleration_c.restype = None
-            acc_dll.compute_acceleration_c.argtypes = [POINTER(c_double), POINTER(c_double), c_int, POINTER(c_double), POINTER(c_double), POINTER(c_double)]
-
-            def plan_paths_c_wrapper(obstacles_py, starts_py, goals_py, steps=200):
-                # Pack obstacles verts
-                poly_counts = []
-                verts = []
-                for poly in obstacles_py:
-                    poly_counts.append(len(poly))
-                    for v in poly:
-                        verts.extend([float(v[0]), float(v[1])])
-                total_vertices = sum(poly_counts)
-                n_polys = len(poly_counts)
-
-                verts_arr = (c_double * (len(verts)))(*verts) if verts else (c_double * 0)()
-                counts_arr = (c_int * n_polys)(*poly_counts) if n_polys>0 else (c_int * 0)()
-
-                starts_flat = []
-                for s in starts_py:
-                    starts_flat.extend([float(s[0]), float(s[1])])
-                goals_flat = []
-                for g in goals_py:
-                    goals_flat.extend([float(g[0]), float(g[1])])
-
-                starts_arr = (c_double * (len(starts_flat)))(*starts_flat) if starts_flat else (c_double * 0)()
-                goals_arr = (c_double * (len(goals_flat)))(*goals_flat) if goals_flat else (c_double * 0)()
-
-                n_agents = len(starts_py)
-                ptr = plan_dll.plan_paths_c(verts_arr, counts_arr, c_int(n_polys), c_int(total_vertices), starts_arr, goals_arr, c_int(n_agents), c_int(steps))
-                res = []
-                if not ptr:
-                    return [[] for _ in range(n_agents)]
-                # New C format: [n_agents(double), counts[0..n_agents-1] (double), coords...]
-                try:
-                    returned_n = int(ptr[0])
-                except Exception:
-                    plan_dll.free_buffer(ptr)
-                    return [[] for _ in range(n_agents)]
-                counts = []
-                for i in range(returned_n):
-                    counts.append(int(ptr[1 + i]))
-                offset = 1 + returned_n
-                coord_idx = offset
-                for i in range(returned_n):
-                    cnt = counts[i]
-                    path = []
-                    for j in range(cnt):
-                        x = ptr[coord_idx + (j*2) + 0]
-                        y = ptr[coord_idx + (j*2) + 1]
-                        path.append((x, y))
-                    coord_idx += cnt * 2
-                    res.append(path)
-                plan_dll.free_buffer(ptr)
-                # If returned fewer agents than requested, pad
-                if len(res) < n_agents:
-                    res.extend([[] for _ in range(n_agents - len(res))])
-                return res
-
-            def compute_acc_c_wrapper(readings, dirs, target_vec, vel, params=None):
-                N = len(readings)
-                # flatten readings and directions
-                rd_arr = (c_double * N)(*map(float, readings)) if N>0 else (c_double * 0)()
-                dir_flat = []
-                for d in dirs:
-                    dir_flat.extend([float(d[0]), float(d[1])])
-                dir_arr = (c_double * (len(dir_flat)))(*dir_flat) if dir_flat else (c_double * 0)()
-                tgt_arr = (c_double * 2)(float(target_vec[0]), float(target_vec[1]))
-                vel_arr = (c_double * 2)(float(vel[0]), float(vel[1]))
-                out_arr = (c_double * 2)()
-                acc_dll.compute_acceleration_c(rd_arr, dir_arr, c_int(N), tgt_arr, vel_arr, out_arr)
-                return (float(out_arr[0]), float(out_arr[1]))
-
-            plan_paths_fn = plan_paths_c_wrapper
-            compute_acc_fn = compute_acc_c_wrapper
-        except Exception:
-            # fallback to python implementations on any failure
-            plan_paths_fn = algorithm.plan_paths
-            compute_acc_fn = algorithm.compute_acceleration
 
     screen, clock, font = renderer.init_display()
     btn_rect = pygame.Rect(10, 10, 90, 30)
@@ -317,7 +263,7 @@ def main():
             try:
                 # 如果 indices 为空，上面已置空 subset_paths
                 if len(indices) > 0:
-                    subset_paths = plan_paths_fn(obstacles, subset_starts, subset_goals, steps=plan_step_max)
+                    subset_paths = plan_paths_fn(obstacles, subset_starts, subset_goals, indices, steps=plan_step_max)
                 else:
                     subset_paths = []
             except Exception:
