@@ -112,6 +112,79 @@ def load_config():
     return cfg
 
 
+# ---------- 新增：三角剖分（Bowyer-Watson）辅助函数 ----------
+def _circumcircle(a, b, c):
+    ax, ay = a; bx, by = b; cx, cy = c
+    d = 2.0 * (ax*(by-cy) + bx*(cy-ay) + cx*(ay-by))
+    if abs(d) < 1e-12:
+        return (0.0, 0.0, float('inf'))
+    a2 = ax*ax + ay*ay
+    b2 = bx*bx + by*by
+    c2 = cx*cx + cy*cy
+    ux = (a2*(by-cy) + b2*(cy-ay) + c2*(ay-by)) / d
+    uy = (a2*(cx-bx) + b2*(ax-cx) + c2*(bx-ax)) / d
+    r2 = (ux-ax)**2 + (uy-ay)**2
+    return (ux, uy, r2)
+
+def _make_edge(a, b):
+    # canonical order for edge key
+    return (a, b) if a <= b else (b, a)
+
+def triangulate_points(points):
+    """
+    Simple Bowyer-Watson Delaunay triangulation for a set of 2D points.
+    Returns list of triangles, each triangle is ((x1,y1),(x2,y2),(x3,y3)).
+    """
+    if len(points) < 3:
+        return []
+    pts = list(points)
+
+    # build super-triangle that contains all points
+    xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
+    minx, maxx = min(xs), max(xs)
+    miny, maxy = min(ys), max(ys)
+    dx = maxx - minx; dy = maxy - miny
+    dmax = max(dx, dy)
+    midx = (minx + maxx) / 2.0
+    midy = (miny + maxy) / 2.0
+    st1 = (midx - 20*dmax, midy - dmax)
+    st2 = (midx, midy + 20*dmax)
+    st3 = (midx + 20*dmax, midy - dmax)
+    pts.extend([st1, st2, st3])
+
+    triangles = [ (st1, st2, st3) ]
+
+    for p in pts[:-3]:
+        bad = []
+        circum_data = {}
+        for tri in triangles:
+            ux, uy, r2 = _circumcircle(tri[0], tri[1], tri[2])
+            dxp = p[0] - ux; dyp = p[1] - uy
+            if dxp*dxp + dyp*dyp <= r2 + 1e-9:
+                bad.append(tri)
+        # polygon hole boundary: collect edges of bad triangles that are not shared twice
+        edge_count = {}
+        for tri in bad:
+            edges = [ _make_edge(tri[0], tri[1]), _make_edge(tri[1], tri[2]), _make_edge(tri[2], tri[0]) ]
+            for e in edges:
+                edge_count[e] = edge_count.get(e, 0) + 1
+        boundary = [e for e,cnt in edge_count.items() if cnt == 1]
+        # remove bad triangles
+        triangles = [t for t in triangles if t not in bad]
+        # re-triangulate hole with point p
+        for e in boundary:
+            triangles.append((e[0], e[1], p))
+
+    # remove triangles that use super-triangle vertices
+    result = []
+    for tri in triangles:
+        if st1 in tri or st2 in tri or st3 in tri:
+            continue
+        result.append(tri)
+    return result
+
+# ---------- end 新增 ----------
+
 def main():
     cfg = load_config()
     sim_rate = cfg.get("simulation_rate", 1)
@@ -241,6 +314,154 @@ def main():
     screen, clock, font = renderer.init_display()
     btn_rect = pygame.Rect(10, 10, 90, 30)
     btn_font = pygame.font.SysFont(None, 20)
+
+    # ---------- 新增：基于三角重心的局部规划函数（覆盖默认 planner） ----------
+    def _point_in_triangle(p, a, b, c):
+        # barycentric technique
+        px, py = p; ax, ay = a; bx, by = b; cx, cy = c
+        v0x, v0y = cx - ax, cy - ay
+        v1x, v1y = bx - ax, by - ay
+        v2x, v2y = px - ax, py - ay
+        dot00 = v0x*v0x + v0y*v0y
+        dot01 = v0x*v1x + v0y*v1y
+        dot02 = v0x*v2x + v0y*v2y
+        dot11 = v1x*v1x + v1y*v1y
+        dot12 = v1x*v2x + v1y*v2y
+        denom = dot00 * dot11 - dot01 * dot01
+        if abs(denom) < 1e-12:
+            return False
+        u = (dot11 * dot02 - dot01 * dot12) / denom
+        v = (dot00 * dot12 - dot01 * dot02) / denom
+        return (u >= -1e-9) and (v >= -1e-9) and (u + v <= 1.0 + 1e-9)
+
+    def _dist(a, b):
+        return math.hypot(a[0]-b[0], a[1]-b[1])
+
+    def _a_star_nodes(nodes, edges, src_idx, tgt_idx):
+        import heapq
+        N = len(nodes)
+        g = [float('inf')] * N
+        prev = [-1] * N
+        g[src_idx] = 0.0
+        def h(i):
+            return _dist(nodes[i], nodes[tgt_idx])
+        pq = [(h(src_idx), src_idx)]
+        closed = [False] * N
+        while pq:
+            f,u = heapq.heappop(pq)
+            if closed[u]:
+                continue
+            if u == tgt_idx:
+                break
+            closed[u] = True
+            for v,w in edges.get(u, []):
+                if closed[v]:
+                    continue
+                tentative = g[u] + w
+                if tentative < g[v]:
+                    g[v] = tentative
+                    prev[v] = u
+                    heapq.heappush(pq, (tentative + h(v), v))
+        if g[tgt_idx] == float('inf'):
+            return None
+        path = []
+        cur = tgt_idx
+        while cur != -1:
+            path.append(nodes[cur])
+            cur = prev[cur]
+        path.reverse()
+        return path
+
+    def plan_via_triangle_centroids(obstacles_py, starts_py, goals_py, steps=200):
+        # Build point set: window corners + obstacle vertices
+        w, h = screen.get_size()
+        pts_set = set()
+        pts_set.add((0.0, 0.0)); pts_set.add((float(w), 0.0))
+        pts_set.add((float(w), float(h))); pts_set.add((0.0, float(h)))
+        for poly in obstacles_py:
+            for v in poly:
+                pts_set.add((float(v[0]), float(v[1])))
+        pts = list(pts_set)
+        # triangulate
+        try:
+            tris = triangulate_points(pts)
+        except Exception:
+            tris = []
+        if not tris:
+            # fallback: straight line paths
+            res = []
+            for s,g in zip(starts_py, goals_py):
+                res.append([(s[0], s[1]), (g[0], g[1])])
+            return res
+
+        # centroids and edge->tri mapping
+        centroids = []
+        edge_map = {}  # edge_key -> list of tri indices
+        for ti, tri in enumerate(tris):
+            a,b,c = tri
+            cx = (a[0]+b[0]+c[0]) / 3.0
+            cy = (a[1]+b[1]+c[1]) / 3.0
+            centroids.append((cx, cy))
+            # edges as ordered keys
+            edges = []
+            for p,q in ((a,b),(b,c),(c,a)):
+                key = (p, q) if p <= q else (q, p)
+                edge_map.setdefault(key, []).append(ti)
+
+        # build adjacency graph among centroids
+        edges = {}
+        for key, tri_idxs in edge_map.items():
+            if len(tri_idxs) >= 2:
+                for i in range(len(tri_idxs)):
+                    for j in range(i+1, len(tri_idxs)):
+                        u = tri_idxs[i]; v = tri_idxs[j]
+                        wgt = _dist(centroids[u], centroids[v])
+                        edges.setdefault(u, []).append((v, wgt))
+                        edges.setdefault(v, []).append((u, wgt))
+
+        results = []
+        for s,g in zip(starts_py, goals_py):
+            spt = (float(s[0]), float(s[1])); gpt = (float(g[0]), float(g[1]))
+            # find triangle containing start/goal
+            s_tri = None; g_tri = None
+            for ti, tri in enumerate(tris):
+                if s_tri is None and _point_in_triangle(spt, tri[0], tri[1], tri[2]):
+                    s_tri = ti
+                if g_tri is None and _point_in_triangle(gpt, tri[0], tri[1], tri[2]):
+                    g_tri = ti
+                if s_tri is not None and g_tri is not None:
+                    break
+            # if not found, pick nearest centroid
+            if s_tri is None:
+                s_tri = min(range(len(centroids)), key=lambda i: _dist(spt, centroids[i]))
+            if g_tri is None:
+                g_tri = min(range(len(centroids)), key=lambda i: _dist(gpt, centroids[i]))
+
+            # create augmented nodes: centroids + start + goal
+            nodes = list(centroids) + [spt, gpt]
+            src_idx = len(nodes) - 2
+            tgt_idx = len(nodes) - 1
+            # clone edges and add connections from start/goal to their centroids
+            aug_edges = {k: list(v) for k,v in edges.items()}
+            # connect start node to its centroid
+            aug_edges.setdefault(src_idx, []).append((s_tri, _dist(spt, centroids[s_tri])))
+            aug_edges.setdefault(s_tri, []).append((src_idx, _dist(spt, centroids[s_tri])))
+            # connect goal node to its centroid
+            aug_edges.setdefault(tgt_idx, []).append((g_tri, _dist(gpt, centroids[g_tri])))
+            aug_edges.setdefault(g_tri, []).append((tgt_idx, _dist(gpt, centroids[g_tri])))
+
+            path = _a_star_nodes(nodes, aug_edges, src_idx, tgt_idx)
+            if path is None:
+                # fallback straight
+                results.append([spt, gpt])
+            else:
+                # ensure strict following: return node path as-is (centroids sequence includes start/goal)
+                results.append(path)
+        return results
+
+    # 覆盖原先的 planner，强制使用三角重心规划
+    plan_paths_fn = plan_via_triangle_centroids
+    # ---------- 结束新增覆盖 ----------
 
     SCALE = 1.0
     OFFSET = (0, 0)
@@ -461,6 +682,31 @@ def main():
         # provide current FPS to renderer (clock.get_fps may reflect recent frames)
         state["fps"] = clock.get_fps()
         renderer.draw_frame(screen, font, state)
+
+        # ---------- 新增：计算并绘制三角剖分（窗口顶点 + 障碍物顶点） ----------
+        try:
+            w,h = screen.get_size()
+            # collect unique points: window corners + obstacle vertices
+            pts_set = set()
+            # window corners
+            pts_set.add((0.0, 0.0)); pts_set.add((float(w), 0.0))
+            pts_set.add((float(w), float(h))); pts_set.add((0.0, float(h)))
+            for poly in obstacles:
+                for v in poly:
+                    pts_set.add((float(v[0]), float(v[1])))
+            pts = list(pts_set)
+            tris = triangulate_points(pts)
+            tri_color = (180, 180, 180)
+            for tri in tris:
+                # draw triangle edges
+                pygame.draw.polygon(screen, tri_color, [tri[0], tri[1], tri[2]], 1)
+            # update display to show overlay
+            pygame.display.update()
+        except Exception:
+            # fail silently if anything goes wrong with triangulation/draw
+            pass
+        # ---------- end 新增 ----------
+
         clock.tick(60)
 
     pygame.quit()
