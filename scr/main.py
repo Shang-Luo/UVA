@@ -37,6 +37,18 @@ def draw_frame(screen, font, state):
         return world_to_screen(p, SCALE, OFFSET)
 
     screen.fill((30,30,30))
+    # draw subdivided grid cells if provided
+    if state.get("IFSHOW", False):
+        for cell in state.get("subdiv_cells", []):
+            try:
+                x, y, size = cell
+                tl = _wts((x, y))
+                br = _wts((x + size, y + size))
+                w = max(1, br[0] - tl[0])
+                h = max(1, br[1] - tl[1])
+                pygame.draw.rect(screen, (80,80,200), (tl[0], tl[1], w, h), 1)
+            except Exception:
+                pass
     # draw starts/goals
     for s in state.get("starts", []):
         pygame.draw.circle(screen, (255,215,0), _wts(s), 4)

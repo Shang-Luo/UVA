@@ -54,7 +54,7 @@ def _normalize(v):
 def _interp(a, b, t):
     return (a[0] + (b[0]-a[0])*t, a[1] + (b[1]-a[1])*t)
 
-def plan_paths(obstacles, starts, goals, steps=200):
+def plan_paths(obstacles, starts, goals, steps=200, grid=None):
     """
     使用可见图 (visibility graph) 为每对 start->goal 规划路径。
     返回每架无人机的路径点列表（2D）。
@@ -65,6 +65,8 @@ def plan_paths(obstacles, starts, goals, steps=200):
     4. 将顶点序列按段插值为总共约 `steps` 个点返回
     """
     import heapq
+
+    # grid-based A* planning will be attempted below after polyline sampler is defined
 
     def dist(a, b):
         return math.hypot(a[0]-b[0], a[1]-b[1])
@@ -145,6 +147,90 @@ def plan_paths(obstacles, starts, goals, steps=200):
             return samples[:steps]
         return samples
 
+    # If a grid (from run.py subdivide_grid) is provided, perform A* on that grid.
+    if grid is not None:
+        # grid: list of (x,y,size)
+        cells = list(grid)
+        # build rects and centers
+        rects = []
+        centers = []
+        for (x, y, size) in cells:
+            rects.append((x, y, x+size, y+size))
+            centers.append((x + size/2.0, y + size/2.0))
+
+        # adjacency: two cells are adjacent if they share an edge (overlap on the other axis)
+        N = len(cells)
+        neighbors = [[] for _ in range(N)]
+        eps = 1e-6
+        for i in range(N):
+            ax1, ay1, ax2, ay2 = rects[i]
+            for j in range(i+1, N):
+                bx1, by1, bx2, by2 = rects[j]
+                # check horizontal touch
+                horiz_touch = (abs(ax2 - bx1) < eps or abs(bx2 - ax1) < eps) and not (ay2 <= by1 + eps or by2 <= ay1 + eps)
+                vert_touch = (abs(ay2 - by1) < eps or abs(by2 - ay1) < eps) and not (ax2 <= bx1 + eps or bx2 <= ax1 + eps)
+                if horiz_touch or vert_touch:
+                    # weight by center distance
+                    w = math.hypot(centers[i][0]-centers[j][0], centers[i][1]-centers[j][1])
+                    neighbors[i].append((j, w))
+                    neighbors[j].append((i, w))
+
+        def find_cell_for_point(p):
+            x, y = p[0], p[1]
+            for idx, (rx1, ry1, rx2, ry2) in enumerate(rects):
+                if rx1 <= x <= rx2 and ry1 <= y <= ry2:
+                    return idx
+            # fallback: nearest center
+            best = 0
+            bd = float('inf')
+            for i, c in enumerate(centers):
+                d = math.hypot(c[0]-x, c[1]-y)
+                if d < bd:
+                    bd = d
+                    best = i
+            return best
+
+        def astar(start_idx, goal_idx):
+            openq = []
+            heapq.heappush(openq, (0.0, start_idx))
+            gscore = {start_idx: 0.0}
+            prev = {start_idx: -1}
+            while openq:
+                f,u = heapq.heappop(openq)
+                if u == goal_idx:
+                    # reconstruct
+                    path = []
+                    cur = u
+                    while cur != -1:
+                        path.append(cur)
+                        cur = prev.get(cur, -1)
+                    path.reverse()
+                    return path
+                for v,w in neighbors[u]:
+                    ng = gscore[u] + w
+                    if ng < gscore.get(v, float('inf')):
+                        gscore[v] = ng
+                        prev[v] = u
+                        # heuristic: euclidean from v to goal center
+                        h = math.hypot(centers[v][0]-centers[goal_idx][0], centers[v][1]-centers[goal_idx][1])
+                        heapq.heappush(openq, (ng + h, v))
+            return None
+
+        paths = []
+        for s, g in zip(starts, goals):
+            si = find_cell_for_point(s)
+            gi = find_cell_for_point(g)
+            pidx = astar(si, gi)
+            if pidx is None:
+                # fallback to visibility graph method below
+                break
+            # convert indices to centers sequence
+            pts = [centers[i] for i in pidx]
+            sampled = sample_polyline(pts, steps)
+            paths.append(sampled)
+        else:
+            return paths
+        # if any pair failed (no path), fall through to original VG method
     paths = []
     # precompute polygon vertices
     poly_vertices = []

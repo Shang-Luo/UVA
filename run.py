@@ -100,6 +100,106 @@ def cast_radar(pos, obstacles, n_dirs, max_range):
     return readings, dirs
 
 
+# -- grid subdivision helpers (ensure defined before use in main) --
+def _orient(a, b, c):
+    return (b[0]-a[0])*(c[1]-a[1]) - (b[1]-a[1])*(c[0]-a[0])
+
+def _seg_seg_intersect(a1, a2, b1, b2):
+    def on_seg(p, q, r):
+        return min(p[0], r[0]) <= q[0] <= max(p[0], r[0]) and min(p[1], r[1]) <= q[1] <= max(p[1], r[1])
+    o1 = _orient(a1, a2, b1)
+    o2 = _orient(a1, a2, b2)
+    o3 = _orient(b1, b2, a1)
+    o4 = _orient(b1, b2, a2)
+    if o1 == 0 and on_seg(a1, b1, a2):
+        return True
+    if o2 == 0 and on_seg(a1, b2, a2):
+        return True
+    if o3 == 0 and on_seg(b1, a1, b2):
+        return True
+    if o4 == 0 and on_seg(b1, a2, b2):
+        return True
+    return (o1>0 and o2<0 or o1<0 and o2>0) and (o3>0 and o4<0 or o3<0 and o4>0)
+
+
+def _rect_poly_intersect(rx, ry, size, poly):
+    corners = [(rx, ry), (rx+size, ry), (rx+size, ry+size), (rx, ry+size)]
+    for v in poly:
+        if rx <= v[0] <= rx+size and ry <= v[1] <= ry+size:
+            return True
+
+    def _point_in_poly(pt, poly):
+        x, y = pt
+        inside = False
+        n = len(poly)
+        for i in range(n):
+            xi, yi = poly[i]
+            xj, yj = poly[(i+1) % n]
+            intersect = ((yi > y) != (yj > y)) and (
+                x < (xj - xi) * (y - yi) / (yj - yi + 1e-12) + xi
+            )
+            if intersect:
+                inside = not inside
+        return inside
+
+    for c in corners:
+        if _point_in_poly(c, poly):
+            return True
+
+    rect_edges = []
+    for i in range(4):
+        a = corners[i]
+        b = corners[(i+1)%4]
+        rect_edges.append((a,b))
+    for i in range(len(poly)):
+        a = poly[i]
+        b = poly[(i+1) % len(poly)]
+        for re in rect_edges:
+            if _seg_seg_intersect(a, b, re[0], re[1]):
+                return True
+    return False
+
+
+def subdivide_grid(obstacles, win_w, win_h, init_size=128, max_depth=5):
+    cells = []
+
+    def process_cell(x, y, size, depth):
+        # If this cell does not intersect any obstacle, keep it as-is (coarse cell)
+        intersects = False
+        for poly in obstacles:
+            if _rect_poly_intersect(x, y, size, poly):
+                intersects = True
+                break
+        if not intersects:
+            cells.append((x, y, size))
+            return
+
+        # If we reached max depth, record the (small) cell
+        if depth >= max_depth:
+            cells.append((x, y, size))
+            return
+
+        # Otherwise subdivide this occupied cell and process children; if a child
+        # does not intersect obstacle it will be recorded as a coarse child cell.
+        half = size / 2.0
+        if half < 1.0:
+            cells.append((x, y, size))
+            return
+        process_cell(x, y, half, depth+1)
+        process_cell(x+half, y, half, depth+1)
+        process_cell(x, y+half, half, depth+1)
+        process_cell(x+half, y+half, half, depth+1)
+
+    sx = 0
+    while sx < win_w:
+        sy = 0
+        while sy < win_h:
+            process_cell(sx, sy, init_size, 0)
+            sy += init_size
+        sx += init_size
+    return cells
+
+
 def load_config():
     cfg_file = os.path.join(BASE_DIR, "config", "set.json")
     cfg = {}
@@ -118,6 +218,8 @@ def main():
     use_py = cfg.get("ifpy", True)
     show_history = cfg.get("show_history", True)
     show_radar = cfg.get("show_radar", True)
+    # IFSHOW 控制是否显示细分网格（step2）
+    ifshow = cfg.get("IFSHOW", True)
     hist_cfg = cfg.get("history", {})
     history_color = tuple(hist_cfg.get("color", [50,120,255]))
     history_width = int(hist_cfg.get("width", 2))
@@ -239,6 +341,11 @@ def main():
             compute_acc_fn = algorithm.compute_acceleration
 
     screen, clock, font = renderer.init_display()
+    # preprocessing: 网格剖分（以窗口大小为范围，初始网格 128x128，最多递归 5 次）
+    try:
+        subdiv_cells = subdivide_grid(obstacles, screen.get_width(), screen.get_height(), init_size=128, max_depth=3)
+    except Exception:
+        subdiv_cells = []
     btn_rect = pygame.Rect(10, 10, 90, 30)
     btn_font = pygame.font.SysFont(None, 20)
 
@@ -301,7 +408,11 @@ def main():
             subset_starts = [current_starts[i] for i in indices]
             subset_goals = [goals[i] for i in indices]
             try:
-                subset_paths = plan_paths_fn(obstacles, subset_starts, subset_goals, steps=plan_step_max)
+                # If we're using the Python implementation, pass subdivided grid for A*.
+                if plan_paths_fn is algorithm.plan_paths:
+                    subset_paths = plan_paths_fn(obstacles, subset_starts, subset_goals, steps=plan_step_max, grid=subdiv_cells)
+                else:
+                    subset_paths = plan_paths_fn(obstacles, subset_starts, subset_goals, steps=plan_step_max)
             except Exception:
                 subset_paths = [[] for _ in indices]
             # assign back into drones' nav_points and planned_paths
@@ -456,6 +567,8 @@ def main():
             "history_width": history_width,
             "SCALE": SCALE,
             "OFFSET": OFFSET,
+            "IFSHOW": ifshow,
+            "subdiv_cells": subdiv_cells,
         }
 
         # provide current FPS to renderer (clock.get_fps may reflect recent frames)
