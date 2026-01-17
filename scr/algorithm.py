@@ -182,8 +182,67 @@ def plan_paths(obstacles, starts, goals, steps=200):
             paths.append(path)
             continue
 
-        # sample the vertex path into dense points
-        sampled = sample_polyline(vg_path, steps)
+              # ===== 新增：对于中间的多边形顶点，沿外角平分线外移 30px =====
+        # 构建顶点->(poly_idx, idx_in_poly) 映射以查找邻接顶点
+        vert_map = {}
+        for pi, poly in enumerate(obstacles):
+            n = len(poly)
+            for vi in range(n):
+                key = (float(poly[vi][0]), float(poly[vi][1]))
+                vert_map.setdefault(key, []).append((pi, vi))
+
+        def _safe_normalize(v):
+            nx = v[0]; ny = v[1]
+            m = math.hypot(nx, ny)
+            if m < 1e-9:
+                return (0.0, 0.0)
+            return (nx/m, ny/m)
+
+        EXT_LEN = 30.0
+        adjusted_path = []
+        for idx_p, pt in enumerate(vg_path):
+            # 保留首尾点不变
+            if idx_p == 0 or idx_p == len(vg_path)-1:
+                adjusted_path.append(pt)
+                continue
+            key = (float(pt[0]), float(pt[1]))
+            if key not in vert_map:
+                adjusted_path.append(pt)
+                continue
+            # 若顶点出现在多个多边形，优先选第一个匹配（通常不会有歧义）
+            poly_idx, vi = vert_map[key][0]
+            poly = obstacles[poly_idx]
+            n = len(poly)
+            # 相邻顶点 u (prev) 和 w (next)
+            u = (poly[(vi-1)%n][0], poly[(vi-1)%n][1])
+            w = (poly[(vi+1)%n][0], poly[(vi+1)%n][1])
+            v = (pt[0], pt[1])
+            vu = (u[0]-v[0], u[1]-v[1])
+            vw = (w[0]-v[0], w[1]-v[1])
+            nu = _safe_normalize(vu)
+            nw = _safe_normalize(vw)
+            # 内角平分线（方向向内）
+            bis = (nu[0] + nw[0], nu[1] + nw[1])
+            bis = _safe_normalize(bis)
+            if bis == (0.0, 0.0):
+                adjusted_path.append(pt)
+                continue
+            # 外角平分线候选方向（取内角平分线的相反方向）
+            cand = (-bis[0], -bis[1])
+            # 判断 cand 是否指向多边形外侧：质心->顶点 向量 与 cand 的点积应为正
+            cent = _centroid(poly)
+            vec_cv = (v[0] - cent[0], v[1] - cent[1])
+            dot = vec_cv[0]*cand[0] + vec_cv[1]*cand[1]
+            if dot >= 0:
+                ext_dir = _safe_normalize(cand)
+            else:
+                # 若不符合则取相反方向（保证朝外）
+                ext_dir = _safe_normalize((-cand[0], -cand[1]))
+            # 延长
+            new_pt = (v[0] + ext_dir[0]*EXT_LEN, v[1] + ext_dir[1]*EXT_LEN)
+            adjusted_path.append(new_pt)
+        # 用调整后的顶点序列继续采样
+        sampled = sample_polyline(adjusted_path, steps)
         paths.append(sampled)
 
     return paths

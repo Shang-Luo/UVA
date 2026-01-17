@@ -398,7 +398,7 @@ def main():
                         break
                     pk = path[idxk]
                     vk = (pk[0] - drone.pos[0], pk[1] - drone.pos[1])
-                    wk = 0.5 ** k
+                    wk = 0.1 ** k
                     vec_sum[0] += wk * vk[0]
                     vec_sum[1] += wk * vk[1]
                     wsum += wk
