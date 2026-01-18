@@ -1,6 +1,6 @@
 {
   "simulation_rate": 20,
-  "rePlan_pathsT": 400,
+  "rePlan_pathsT": 1000,
   "plan_step_max": 20,
   "show_history": true,
   "history": {

@@ -656,7 +656,8 @@ def main():
                         if d2 < best_d2:
                             best_d2 = d2
                             nearest_idx = idx
-                nearest_idx=0
+                path=path[nearest_idx:]
+                nearest_idx = 0
                 max_k = 6
                 ws = []
                 vec_sum = [0.0, 0.0]
