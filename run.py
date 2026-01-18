@@ -78,6 +78,53 @@ def ray_segment_intersection(p, dir_unit, a, b, max_range):
             return (dist, (ix, iy))
     return None
 
+def is_point_in_polygon(point, polygon):
+    """
+    判断点是否在多边形内部（射线法）
+    """
+    x, y = point
+    n = len(polygon)
+    inside = False
+    
+    p1x, p1y = polygon[0]
+    for i in range(n + 1):
+        p2x, p2y = polygon[i % n]
+        if y > min(p1y, p2y):
+            if y <= max(p1y, p2y):
+                if x <= max(p1x, p2x):
+                    if p1y != p2y:
+                        xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                    if p1x == p2x or x <= xinters:
+                        inside = not inside
+        p1x, p1y = p2x, p2y
+    
+    return inside
+
+def filter_triangles_by_obstacles(triangles, obstacles):
+    """
+    过滤掉重心位于障碍物内部的三角形
+    """
+    filtered_tris = []
+    
+    for tri in triangles:
+        # 1. 计算三角形重心
+        a, b, c = tri
+        centroid_x = (a[0] + b[0] + c[0]) / 3.0
+        centroid_y = (a[1] + b[1] + c[1]) / 3.0
+        centroid = (centroid_x, centroid_y)
+        
+        # 2. 判断重心是否在任何一个障碍物内部
+        in_obstacle = False
+        for obstacle in obstacles:
+            if is_point_in_polygon(centroid, obstacle):
+                in_obstacle = True
+                break
+        
+        # 3. 如果重心不在障碍物内，保留三角形
+        if not in_obstacle:
+            filtered_tris.append(tri)
+    
+    return filtered_tris
 
 def cast_radar(pos, obstacles, n_dirs, max_range):
     readings = []
@@ -385,6 +432,7 @@ def main():
         # triangulate
         try:
             tris = triangulate_points(pts)
+            tris = filter_triangles_by_obstacles(tris, obstacles_py)
         except Exception:
             tris = []
         if not tris:
@@ -559,7 +607,7 @@ def main():
             if path:
                 near_dist = math.hypot(path[nearest_idx][0] - drone.pos[0], path[nearest_idx][1] - drone.pos[1])
                 # 判断：当无人机中心与导航点距离小于无人机半径时视为到达
-                if near_dist < drone.radius:
+                if near_dist-10 < drone.radius:
                     try:
                         del path[nearest_idx]
                     except Exception:
@@ -574,7 +622,7 @@ def main():
             spos = (int(drone.pos[0]*SCALE + OFFSET[0]), int(drone.pos[1]*SCALE + OFFSET[1]))
             goal_world = goals[i]
             gpos = (int(goal_world[0]*SCALE + OFFSET[0]), int(goal_world[1]*SCALE + OFFSET[1]))
-            if (not drone.arrived) and (math.hypot(spos[0]-gpos[0], spos[1]-gpos[1]) <= 15):
+            if (not drone.arrived) and (math.hypot(spos[0]-gpos[0], spos[1]-gpos[1]) <= 25):
                 drone.pos[0] = float(goal_world[0])
                 drone.pos[1] = float(goal_world[1])
                 drone.vel = [0.0, 0.0]
@@ -608,7 +656,7 @@ def main():
                         if d2 < best_d2:
                             best_d2 = d2
                             nearest_idx = idx
-
+                nearest_idx=0
                 max_k = 6
                 ws = []
                 vec_sum = [0.0, 0.0]
@@ -619,7 +667,7 @@ def main():
                         break
                     pk = path[idxk]
                     vk = (pk[0] - drone.pos[0], pk[1] - drone.pos[1])
-                    wk = 0.5 ** k
+                    wk = (k==0)
                     vec_sum[0] += wk * vk[0]
                     vec_sum[1] += wk * vk[1]
                     wsum += wk
@@ -659,7 +707,16 @@ def main():
                     drone.history.append((drone.pos[0], drone.pos[1]))
                     if len(drone.history) > history_max_len:
                         drone.history = drone.history[-history_max_len:]
-
+        w,h = screen.get_size()
+        # collect unique points: window corners + obstacle vertices
+        pts_set = set()
+        # window corners
+        pts_set.add((0.0, 0.0)); pts_set.add((float(w), 0.0))
+        pts_set.add((float(w), float(h))); pts_set.add((0.0, float(h)))
+        for poly in obstacles:
+            for v in poly:
+                pts_set.add((float(v[0]), float(v[1])))
+        
         # prepare renderer state
         state = {
             "starts": starts,
@@ -677,6 +734,7 @@ def main():
             "history_width": history_width,
             "SCALE": SCALE,
             "OFFSET": OFFSET,
+            "tris": filter_triangles_by_obstacles(triangulate_points(list(pts_set)), obstacles)
         }
 
         # provide current FPS to renderer (clock.get_fps may reflect recent frames)
@@ -684,31 +742,8 @@ def main():
         renderer.draw_frame(screen, font, state)
 
         # ---------- 新增：计算并绘制三角剖分（窗口顶点 + 障碍物顶点） ----------
-        try:
-            w,h = screen.get_size()
-            # collect unique points: window corners + obstacle vertices
-            pts_set = set()
-            # window corners
-            pts_set.add((0.0, 0.0)); pts_set.add((float(w), 0.0))
-            pts_set.add((float(w), float(h))); pts_set.add((0.0, float(h)))
-            for poly in obstacles:
-                for v in poly:
-                    pts_set.add((float(v[0]), float(v[1])))
-            pts = list(pts_set)
-            tris = triangulate_points(pts)
-            tri_color = (180, 180, 180)
-            for tri in tris:
-                # draw triangle edges
-                pygame.draw.polygon(screen, tri_color, [tri[0], tri[1], tri[2]], 1)
-            # update display to show overlay
-            pygame.display.update()
-        except Exception:
-            # fail silently if anything goes wrong with triangulation/draw
-            pass
-        # ---------- end 新增 ----------
-
         clock.tick(60)
-
+        
     pygame.quit()
 
 

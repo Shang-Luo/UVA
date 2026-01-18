@@ -94,6 +94,12 @@ def draw_frame(screen, font, state):
         rtext = font.render(str(getattr(drone, "radar", "")), True, (200,200,200))
         rrect = rtext.get_rect(center=(spos[0], spos[1] + r_screen + 10))
         screen.blit(rtext, rrect)
+    tris = state.get("tris", [])
+    tri_color = (180, 180, 180)
+    for tri in tris:
+        # draw triangle edges
+        pygame.draw.polygon(screen, tri_color, [tri[0], tri[1], tri[2]], 1)
+    
 
     # draw button
     btn_rect = state.get("btn_rect")
