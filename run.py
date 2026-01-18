@@ -164,32 +164,36 @@ def subdivide_grid(obstacles, win_w, win_h, init_size=128, max_depth=5):
     cells = []
 
     def process_cell(x, y, size, depth):
-        # If this cell does not intersect any obstacle, keep it as-is (coarse cell)
+        # 检查单元格是否与障碍物相交
         intersects = False
         for poly in obstacles:
             if _rect_poly_intersect(x, y, size, poly):
                 intersects = True
                 break
+        
+        # === 修改点1：如果不与障碍物相交，记录单元格 ===
         if not intersects:
             cells.append((x, y, size))
             return
-
-        # If we reached max depth, record the (small) cell
+        
+        # === 修改点2：如果与障碍物相交，不记录单元格，继续细分 ===
+        
+        # 如果达到最大深度，直接返回（不记录）
         if depth >= max_depth:
-            cells.append((x, y, size))
-            return
-
-        # Otherwise subdivide this occupied cell and process children; if a child
-        # does not intersect obstacle it will be recorded as a coarse child cell.
+            return  # 不记录有障碍物的单元格
+        
+        # 细分单元格
         half = size / 2.0
         if half < 1.0:
-            cells.append((x, y, size))
-            return
+            return  # 单元格太小，不记录
+        
+        # 递归处理子单元格
         process_cell(x, y, half, depth+1)
         process_cell(x+half, y, half, depth+1)
         process_cell(x, y+half, half, depth+1)
         process_cell(x+half, y+half, half, depth+1)
 
+    # 初始化网格划分
     sx = 0
     while sx < win_w:
         sy = 0
@@ -197,6 +201,7 @@ def subdivide_grid(obstacles, win_w, win_h, init_size=128, max_depth=5):
             process_cell(sx, sy, init_size, 0)
             sy += init_size
         sx += init_size
+    
     return cells
 
 
@@ -230,7 +235,7 @@ def main():
 
     # planning configuration
     replan_T = int(cfg.get("rePlan_pathsT", 10))
-    plan_step_max = int(cfg.get("plan_step_max", 20))
+    plan_step_max = int(cfg.get("plan_step_max", 100))
     # planning bookkeeping
     planned_paths = [[] for _ in drones]
     # replan_frame records the current frame index inside a T-frame replan cycle (0..T-1)
@@ -343,7 +348,7 @@ def main():
     screen, clock, font = renderer.init_display()
     # preprocessing: 网格剖分（以窗口大小为范围，初始网格 128x128，最多递归 5 次）
     try:
-        subdiv_cells = subdivide_grid(obstacles, screen.get_width(), screen.get_height(), init_size=128, max_depth=3)
+        subdiv_cells = subdivide_grid(obstacles, screen.get_width(), screen.get_height(), init_size=128, max_depth=4)
     except Exception:
         subdiv_cells = []
     btn_rect = pygame.Rect(10, 10, 90, 30)
@@ -413,6 +418,20 @@ def main():
                     subset_paths = plan_paths_fn(obstacles, subset_starts, subset_goals, steps=plan_step_max, grid=subdiv_cells)
                 else:
                     subset_paths = plan_paths_fn(obstacles, subset_starts, subset_goals, steps=plan_step_max)
+                
+                # 确保每条路径的最后一个点是终点（goal）
+                for j, ai in enumerate(indices):
+                    # 只有在无人机未到达时才添加终点
+                    if not drones[ai].arrived:
+                        path = subset_paths[j] if j < len(subset_paths) else []
+                        goal = goals[ai]  # 注意这里是 goals[ai] 而不是 subset_goals[j]
+                        if path and (len(path) == 0 or path[-1][0] != goal[0] or path[-1][1] != goal[1]):
+                            # 如果路径非空且最后一个点不是终点，添加终点
+                            path.append(goal)
+                        elif not path:
+                            # 如果路径为空，直接将终点作为路径
+                            path = [goal]
+                        subset_paths[j] = path
             except Exception:
                 subset_paths = [[] for _ in indices]
             # assign back into drones' nav_points and planned_paths
@@ -444,27 +463,30 @@ def main():
                 if d2 < best_d2:
                     best_d2 = d2
                     nearest_idx = idx
-
+            path = path[nearest_idx:]  # trim path to start from nearest point
+            nearest_idx = 0  # reset nearest_idx after trimming
             # 如果已非常接近最近的导航点，则认为已到达并从路径中移除该点，避免停在点上
             if path:
                 near_dist = math.hypot(path[nearest_idx][0] - drone.pos[0], path[nearest_idx][1] - drone.pos[1])
                 # 判断：当无人机中心与导航点距离小于无人机半径时视为到达
-                if near_dist < drone.radius:
-                    try:
-                        del path[nearest_idx]
-                    except Exception:
-                        pass
-                    # 同步回存储的路径
-                    drone.nav_points = path
-                    planned_paths[i] = path
-                    if not path:
-                        continue
+                if near_dist-5 < drone.radius:
+                    # 如果这个导航点不是路径的最后一个点（即终点），则删除
+                    if nearest_idx < len(path) - 1:
+                        try:
+                            del path[nearest_idx]
+                        except Exception:
+                            pass
+                        # 同步回存储的路径
+                        drone.nav_points = path
+                        planned_paths[i] = path
+                        if not path:
+                            continue
 
             # reached goal check
             spos = (int(drone.pos[0]*SCALE + OFFSET[0]), int(drone.pos[1]*SCALE + OFFSET[1]))
             goal_world = goals[i]
             gpos = (int(goal_world[0]*SCALE + OFFSET[0]), int(goal_world[1]*SCALE + OFFSET[1]))
-            if (not drone.arrived) and (math.hypot(spos[0]-gpos[0], spos[1]-gpos[1]) <= 15):
+            if (not drone.arrived) and (math.hypot(spos[0]-gpos[0], spos[1]-gpos[1]) <= 35):
                 drone.pos[0] = float(goal_world[0])
                 drone.pos[1] = float(goal_world[1])
                 drone.vel = [0.0, 0.0]
@@ -509,7 +531,7 @@ def main():
                         break
                     pk = path[idxk]
                     vk = (pk[0] - drone.pos[0], pk[1] - drone.pos[1])
-                    wk = 0.5 ** k
+                    wk = 0.2 ** k
                     vec_sum[0] += wk * vk[0]
                     vec_sum[1] += wk * vk[1]
                     wsum += wk

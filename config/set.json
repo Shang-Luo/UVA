@@ -1,7 +1,7 @@
 {
   "simulation_rate": 20,
-  "rePlan_pathsT": 100,
-  "plan_step_max": 20,
+  "rePlan_pathsT": 400,
+  "plan_step_max": 100,
   "show_history": true,
   "history": {
     "color": [50, 120, 255],
