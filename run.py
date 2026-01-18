@@ -176,7 +176,7 @@ def main():
                 robot_r = 0.0
             # increase max_iter to improve chance of finding a path
             # set max iterations to large int (2^31-1) as requested
-            max_iter_use = 2147483647
+            max_iter_use = 1073741823
             path = rrt_star(tuple(s), tuple(g), rrt_obs, (xmin, ymin, xmax, ymax), max_iter=max_iter_use, step_size=8.0, search_radius=30.0, goal_sample_rate=0.05, robot_radius=robot_r, smooth=True, samples_per_segment=12)
             res.append(path if path is not None else [])
         return res
